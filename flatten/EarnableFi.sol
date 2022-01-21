@@ -1,3 +1,7 @@
+// Sources flattened with hardhat v2.8.3 https://hardhat.org
+
+// File contracts/token/EarnableFi.sol
+
 // Sources flattened with hardhat v2.4.0 https://hardhat.org
 
 // File @openzeppelin/contracts/utils/Context.sol@v4.1.0
@@ -1266,6 +1270,88 @@ interface IUniswapV2Factory {
 
 
 pragma solidity >=0.8.0;
+contract PassiveIncomeStaking is Ownable {
+    using SafeMath for uint256;
+    using SafeERC20 for IERC20;
+
+    struct CoinTypeInfo {
+        address coinAddress;
+        address[] routerPath;
+    }
+
+    address public efiAddress;
+    address uniswapPair;
+    IUniswapV2Router02 uniswapRouter;
+
+    mapping(address => uint256) public claimed;
+    CoinTypeInfo[] public coins;
+
+    constructor(address _efiAddress) {
+        efiAddress = _efiAddress;
+
+        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(
+            0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
+        );
+        // Create a uniswap pair for this new token
+        uniswapPair = IUniswapV2Factory(_uniswapV2Router.factory())
+            .createPair(address(this), _uniswapV2Router.WETH());
+
+        // set the rest of the contract variables
+        uniswapRouter = _uniswapV2Router;
+    }
+
+    function withdrawDividends(uint16 _cId) external {
+        uint256 holdingAmount = IERC20(efiAddress).balanceOf(msg.sender);
+        uint256 totalSupply = IERC20(efiAddress).totalSupply();
+        uint256 brut = IERC20(efiAddress).balanceOf(address(this)).mul(holdingAmount).div(totalSupply);
+
+        require(brut > claimed[msg.sender], 'not enough to claim');
+
+        uint256 withdrawable = brut.sub(claimed[msg.sender]);
+        
+        CoinTypeInfo storage coin = coins[_cId];
+        if (_cId == 0) { // if withdrawing token
+            IERC20(efiAddress).safeTransfer(msg.sender, withdrawable);
+        } else if (_cId == 1) { // if withdrawing ETH
+            swapETH(withdrawable, coin.routerPath, payable(msg.sender));
+        } else { // if withdrawing other coins
+            swapCoin(withdrawable, coin.routerPath, msg.sender);
+        }
+        claimed[msg.sender] = claimed[msg.sender].add(withdrawable);
+    }
+
+    function withdrawableDividends() external view returns (uint256) {
+        uint256 holdingAmount = IERC20(efiAddress).balanceOf(msg.sender);
+        uint256 totalSupply = IERC20(efiAddress).totalSupply();
+        uint256 brut = IERC20(efiAddress).balanceOf(address(this)).mul(holdingAmount).div(totalSupply);
+
+        if (brut > claimed[msg.sender]) {
+            return brut.sub(claimed[msg.sender]);
+        }
+        return 0;
+    }
+
+    function swapETH(uint256 _amount, address[] memory _path, address payable _to) private {
+        uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(_amount, 0, _path, _to, block.timestamp.add(300));
+    }
+
+    function swapCoin(uint256 _amount, address[] memory _path, address _to) private {
+        uniswapRouter.swapExactTokensForTokensSupportingFeeOnTransferTokens(_amount, 0, _path, _to, block.timestamp.add(300));
+    }
+
+    function addCoinInfo(address[] memory _path, address _coinAddr) external onlyOwner {
+        coins.push(CoinTypeInfo({
+            coinAddress: _coinAddr,
+            routerPath: _path
+        }));
+    }
+
+    function updateCoinInfo(uint8 _cId, address[] memory _path, address _coinAddr) external onlyOwner {
+        CoinTypeInfo storage coin = coins[_cId];
+        coin.routerPath = _path;
+        coin.coinAddress = _coinAddr;
+    }
+}
 
 contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
     using SafeMath for uint256;
@@ -1528,10 +1614,8 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
             if (_cId == 0) { // if withdrawing token
                 transfer(msg.sender, withdrawable);
             } else if (_cId == 1) { // if withdrawing ETH
-                _approve(address(this), address(uniswapRouter), withdrawable);
                 uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(withdrawable, 0, coin.routerPath, msg.sender, block.timestamp.add(300));
             } else { // if withdrawing other coins
-                _approve(address(this), address(uniswapRouter), withdrawable);
                 uniswapRouter.swapExactTokensForTokensSupportingFeeOnTransferTokens(withdrawable, 0, coin.routerPath, msg.sender, block.timestamp.add(300));
             }
             claimed[msg.sender] = claimed[msg.sender].add(withdrawable);
@@ -1539,13 +1623,13 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
         }
     }
 
-    function withdrawableDividends(address _user) external view returns (uint256) {
-        uint256 holdingAmount = balanceOf(_user);
+    function withdrawableDividends() external view returns (uint256) {
+        uint256 holdingAmount = balanceOf(msg.sender);
         uint256 totalSupply = totalSupply();
         uint256 brut = totalDividends.mul(holdingAmount).div(totalSupply);
 
-        if (brut > claimed[_user]) {
-            return brut.sub(claimed[_user]);
+        if (brut > claimed[msg.sender]) {
+            return brut.sub(claimed[msg.sender]);
         }
         return 0;
     }

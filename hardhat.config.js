@@ -19,7 +19,7 @@ task('accounts', 'Prints the list of accounts', async () => {
  * @type import('hardhat/config').HardhatUserConfig
  */
  module.exports = {
-  defaultNetwork: 'binanceTestnet',
+  defaultNetwork: 'rinkeby',
   networks: {
     hardhat: {},
     mainnet: {
