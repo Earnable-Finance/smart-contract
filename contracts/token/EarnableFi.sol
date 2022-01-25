@@ -1281,14 +1281,14 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
     uint16 private maxTransferAmountRate = 1000;
 
     uint256 public minAmountToSwap = 1000000000 * 1e18;    // 10% of total supply
-    uint256 public totalDividends;
+    uint256 public totalDividends;  // dividend balance in balanceOf(address(this))
+    uint256 public increasedDividends; // dividend amount so far
 
     IUniswapV2Router02 public uniswapRouter;
     // The trading pair
     address public uniswapPair;
 
     address public feeRecipient = 0xf9054E835566250EB85BBB5A241d071035D34Cf5;
-    address public passiveIncomeStakingAddress;
 
     // In swap and withdraw
     bool private _inSwapAndWithdraw;
@@ -1307,7 +1307,9 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
         address[] routerPath;
     }
 
-    mapping(address => uint256) public claimed;
+    mapping(address => uint256) public claimed; // claimed amount by user
+    mapping(address => uint256) public dividendsWhenClaim;  // dividend amount when user are claiming
+
     CoinTypeInfo[] public coins;
 
     modifier onlyOperator() {
@@ -1324,14 +1326,14 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
     modifier transferTaxFree {
         uint16 _devTaxRate = devTaxRate;
         uint16 _marketingTaxRate = marketingTaxRate;
-        uint16 _burnTaxRate = burnTaxRate;
+        uint16 _passiveIncomeRewardTaxRate = passiveIncomeRewardTaxRate;
         devTaxRate = 0;
         marketingTaxRate = 0;
-        burnTaxRate = 0;
+        passiveIncomeRewardTaxRate = 0;
         _;
         devTaxRate = _devTaxRate;
         marketingTaxRate = _marketingTaxRate;
-        burnTaxRate = _burnTaxRate;
+        passiveIncomeRewardTaxRate = _passiveIncomeRewardTaxRate;
     }
 
     constructor() public {
@@ -1399,6 +1401,7 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
             super._transfer(_sender, address(this), marketingFee);
             super._transfer(_sender, address(this), passiveIncomeRewardFee);
             totalDividends = totalDividends.add(passiveIncomeRewardFee);
+            increasedDividends = increasedDividends.add(passiveIncomeRewardFee);
         }
     }
 
@@ -1436,10 +1439,6 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
     function manualWithdraw() external onlyOperator {
         uint256 bal = address(this).balance;
         payable(feeRecipient).transfer(bal);
-    }
-
-    function setPassiveIncomeStakingAddress(address _stakingAddress) external onlyOperator {
-        passiveIncomeStakingAddress = _stakingAddress;
     }
 
     /// @dev Swap and liquify
@@ -1481,9 +1480,9 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
         return totalSupply().mul(maxTransferAmountRate).div(MAX_BP_RATE);
     }
 
-    function updateFees(uint16 _burnTaxRate, uint16 _devTaxRate, uint16 _marketingTaxRate) external onlyOwner {
-        require(_burnTaxRate + _devTaxRate + _marketingTaxRate <= MAX_BP_RATE, '!values');
-        burnTaxRate = _burnTaxRate;
+    function updateFees(uint16 _passiveIncomeRate, uint16 _devTaxRate, uint16 _marketingTaxRate) external onlyOwner {
+        require(_passiveIncomeRate + _devTaxRate + _marketingTaxRate <= MAX_BP_RATE, '!values');
+        passiveIncomeRewardTaxRate = _passiveIncomeRate;
         devTaxRate = _devTaxRate;
         marketingTaxRate = _marketingTaxRate;
     }
@@ -1495,6 +1494,7 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
 
     function openTrading() external onlyOwner {
         _tradingOpen = true;
+        swapAndWithdrawEnabled = true;
         maxTransferAmountRate = MAX_BP_RATE;
     }
 
@@ -1516,16 +1516,10 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
 
     function withdrawDividends(uint16 _cId) external {
         if (totalDividends <= balanceOf(address(this))) {
-            uint256 holdingAmount = balanceOf(msg.sender);
-            uint256 totalSupply = totalSupply();
-            uint256 brut = totalDividends.mul(holdingAmount).div(totalSupply);
-
-            require(brut > claimed[msg.sender], 'not enough to claim');
-
-            uint256 withdrawable = brut.sub(claimed[msg.sender]);
-            
+            uint256 withdrawable = withdrawableDividends(msg.sender);
+            require(withdrawable > 0, "not enough to claim");
             CoinTypeInfo storage coin = coins[_cId];
-            if (_cId == 0) { // if withdrawing token
+            if (_cId == 0) { // if withdrawing token, reinvest
                 transfer(msg.sender, withdrawable);
             } else if (_cId == 1) { // if withdrawing ETH
                 _approve(address(this), address(uniswapRouter), withdrawable);
@@ -1535,29 +1529,46 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
                 uniswapRouter.swapExactTokensForTokensSupportingFeeOnTransferTokens(withdrawable, 0, coin.routerPath, msg.sender, block.timestamp.add(300));
             }
             claimed[msg.sender] = claimed[msg.sender].add(withdrawable);
+            dividendsWhenClaim[msg.sender] = increasedDividends;
             totalDividends = totalDividends.sub(withdrawable);
         }
     }
 
-    function withdrawableDividends(address _user) external view returns (uint256) {
+    function withdrawableDividends(address _user) public view returns (uint256) {
         uint256 holdingAmount = balanceOf(_user);
-        uint256 totalSupply = totalSupply();
-        uint256 brut = totalDividends.mul(holdingAmount).div(totalSupply);
+        uint256 soldAmount = tokenAmountSold();
+        if (soldAmount == 0) {
+            return 0;
+        }
 
-        if (brut > claimed[_user]) {
-            return brut.sub(claimed[_user]);
+        uint256 availableAmount = increasedDividends.sub(dividendsWhenClaim[_user]);
+
+        if (availableAmount > 0) {
+            uint256 brut = availableAmount.mul(holdingAmount).div(soldAmount);
+
+            if (brut > totalDividends) {
+                return totalDividends;
+            } else {
+                return brut;
+            }
         }
         return 0;
     }
 
-    function addCoinInfo(address[] memory _path, address _coinAddr) external onlyOwner {
+    function tokenAmountSold() private view returns (uint256) {
+        uint256 tokenBalanceInLp = balanceOf(uniswapPair);
+        uint256 soldAmount = totalSupply().sub(tokenBalanceInLp);
+        return soldAmount;
+    }
+
+    function addCoinInfo(address[] memory _path, address _coinAddr) external onlyOperator {
         coins.push(CoinTypeInfo({
             coinAddress: _coinAddr,
             routerPath: _path
         }));
     }
 
-    function updateCoinInfo(uint8 _cId, address[] memory _path, address _coinAddr) external onlyOwner {
+    function updateCoinInfo(uint8 _cId, address[] memory _path, address _coinAddr) external onlyOperator {
         CoinTypeInfo storage coin = coins[_cId];
         coin.routerPath = _path;
         coin.coinAddress = _coinAddr;
@@ -1785,4 +1796,7 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
         assembly { chainId := chainid() }
         return chainId;
     }
+
+    //to recieve ETH from uniswapV2Router when swaping
+    receive() external payable {}
 }
