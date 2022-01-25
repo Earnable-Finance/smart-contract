@@ -1302,6 +1302,9 @@ contract EarnableFi is ERC20('EarnableFi', 'EFI'), Ownable {
 
     bool private _tradingOpen = false;
 
+    string public website = "https://earnablefi.com";
+    string public telegram = "https://t.me/earnablefiportal";
+
     struct CoinTypeInfo {
         address coinAddress;
         address[] routerPath;
